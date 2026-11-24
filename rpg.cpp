@@ -17,6 +17,14 @@
 //   * Сбор ресурсов, крафт, ежедневные заказы, квесты, репутация
 //   * Спутники, бестиарий, достижения, карта мира
 //   * 3 слота сохранения + автосохранение
+//   * Стихии (огонь, лёд, яд, свет, молния): слабости и сопротивления врагов,
+//     горение, заморозка; элементные бомбы и оружие
+//   * Особый приём класса, который заряжается в бою (берсерк / арканный взрыв /
+//     танец теней)
+//   * Редкая экипировка (редкая, эпическая, легендарная) со случайными свойствами:
+//     крит, вампиризм, уклонение, стихия; сохраняется вместе с игрой
+//   * «Бездна» — процедурное подземелье: выбор дверей, стражи этажей,
+//     контрольные точки, тёмный торговец
 // ============================================================================
 #include <iostream>
 #include <vector>
@@ -229,6 +237,14 @@ void waitEnter() {
 // ============================================================================
 //  ДАННЫЕ: предметы
 // ============================================================================
+enum Elem { EL_PHYS, EL_FIRE, EL_ICE, EL_POISON, EL_HOLY, EL_SHOCK };
+const char* EL_NAMES[] = {"физ.", "огонь", "лёд", "яд", "свет", "молния"};
+const char* EL_SUFFIX[] = {"", "огня", "льда", "яда", "света", "молний"};
+string elemStr(int e) {
+    const char* cols[] = {Col::GRAY, Col::ORANGE, Col::CYAN, Col::GREEN, Col::YELLOW, Col::MAGENTA};
+    return paint(EL_NAMES[e], cols[e]);
+}
+
 enum IType { WEAPON, ARMOR, ACCESSORY, HEAL, MANA, MATERIAL, BOMB, CURE };
 
 struct Item {
@@ -238,15 +254,21 @@ struct Item {
     int atk, def, hp, mp;  // экипировка: бонусы; расходники: hp/mp — эффект
     int price;
     string desc;
+    int rarity = 0;  // 0 обычный, 1 редкий, 2 эпический, 3 легендарный
+    int crit = 0, steal = 0, dodge = 0;  // бонусы к криту, вампиризму, уклонению (%)
+    int elem = 0;                        // стихия оружия / бомбы
+    int base = 0;                        // базовый предмет для сгенерированных
 };
 vector<Item> ITEMS;
+int STATIC_ITEMS = 0;  // число «обычных» предметов; всё после — сгенерированная экипировка
 
 enum ItemId {
     I_NONE, I_RUSTY, I_STEEL, I_AXE, I_STAFF1, I_STAFF2, I_DAGGER, I_MITHRIL,
     I_LEATHER, I_CHAIN, I_PLATE, I_ROBE, I_RING_STR, I_AMULET, I_RING_WIS,
     I_HP_S, I_HP_L, I_MP_S, I_MP_L, I_PELT, I_FANG, I_ORE, I_SCALE, I_CRYSTAL,
     I_WOLFARMOR, I_SPIDERDAGGER, I_DRAGONARMOR, I_DRAGONSWORD, I_ELIXIR,
-    I_BOMB, I_ANTIDOTE, I_HERB, I_MOONFLOWER, I_TROLLCROWN, I_TROLLCLUB
+    I_BOMB, I_ANTIDOTE, I_HERB, I_MOONFLOWER, I_TROLLCROWN, I_TROLLCLUB,
+    I_ICEBOMB, I_ACID, I_HOLYWATER
 };
 
 void initItems() {
@@ -288,6 +310,17 @@ void initItems() {
     add("Лунный цветок", MATERIAL, 0, 0, 0, 0, 14, "Расцветает по ночам.");
     add("Корона Грока", ACCESSORY, 4, 2, 30, 0, 400, "Трофей короля троллей.");
     add("Дубина Грока", WEAPON, 17, 0, 0, 0, 450, "Просто огромная палка.");
+    add("Ледяная бомба", BOMB, 0, 0, 42, 0, 38, "Морозный взрыв.");
+    add("Кислотная склянка", BOMB, 0, 0, 40, 0, 30, "Разъедает плоть.");
+    add("Святая вода", BOMB, 0, 0, 50, 0, 45, "Жжёт нежить и тьму.");
+    ITEMS[I_BOMB].elem = EL_FIRE;
+    ITEMS[I_ICEBOMB].elem = EL_ICE;
+    ITEMS[I_ACID].elem = EL_POISON;
+    ITEMS[I_HOLYWATER].elem = EL_HOLY;
+    ITEMS[I_BOMB].desc = "Огненный взрыв.";
+    ITEMS[I_ANTIDOTE].desc = "Снимает яд и горение.";
+    STATIC_ITEMS = (int)ITEMS.size();
+    ITEMS.reserve(STATIC_ITEMS + 4000);  // ссылки на предметы не должны инвалидироваться
 }
 
 string itemColor(IType t) {
@@ -302,19 +335,27 @@ string itemColor(IType t) {
         default: return Col::GRAY;
     }
 }
-string itemName(int id) { return paint(ITEMS[id].name, itemColor(ITEMS[id].type)); }
+string itemName(int id) {
+    const Item& it = ITEMS[id];
+    const char* rc[] = {Col::GRAY, Col::BLUE, Col::MAGENTA, Col::ORANGE};
+    return paint(it.name, it.rarity > 0 ? string(rc[it.rarity]) : itemColor(it.type));
+}
 string statsStr(const Item& it) {
     vector<string> v;
     if (it.type == HEAL || it.type == MANA) {
         if (it.hp) v.push_back("+" + to_string(it.hp) + " HP");
         if (it.mp) v.push_back("+" + to_string(it.mp) + " MP");
-    } else if (it.type == BOMB) v.push_back("урон ~" + to_string(it.hp));
-    else if (it.type == CURE) v.push_back("лечит яд");
+    } else if (it.type == BOMB) v.push_back("урон ~" + to_string(it.hp) + ", " + elemStr(it.elem));
+    else if (it.type == CURE) v.push_back("снимает яд и горение");
     else if (it.type == WEAPON || it.type == ARMOR || it.type == ACCESSORY) {
         if (it.atk) v.push_back("атк +" + to_string(it.atk));
         if (it.def) v.push_back("защ +" + to_string(it.def));
         if (it.hp) v.push_back("HP +" + to_string(it.hp));
         if (it.mp) v.push_back("MP +" + to_string(it.mp));
+        if (it.crit) v.push_back("крит +" + to_string(it.crit) + "%");
+        if (it.steal) v.push_back("вампиризм " + to_string(it.steal) + "%");
+        if (it.dodge) v.push_back("уклон. +" + to_string(it.dodge) + "%");
+        if (it.elem) v.push_back(elemStr(it.elem));
     } else v.push_back("материал");
     string s;
     for (size_t i = 0; i < v.size(); i++) s += (i ? ", " : "") + v[i];
@@ -322,6 +363,72 @@ string statsStr(const Item& it) {
 }
 bool isEquip(IType t) { return t == WEAPON || t == ARMOR || t == ACCESSORY; }
 bool isCombatItem(IType t) { return t == HEAL || t == MANA || t == BOMB || t == CURE; }
+
+// ---------- Генерация экипировки со случайными свойствами ----------
+map<string, int> GEN_KEYS;
+const char* RAR_TAG[] = {"", "редк.", "эпич.", "легенд."};
+
+int addGenItem(const Item& proto) {  // proto — полностью заполненный предмет
+    char buf[160];
+    snprintf(buf, sizeof buf, "%d|%d|%d|%d|%d|%d|%d|%d|%d|%d", proto.base, proto.rarity, proto.atk, proto.def,
+             proto.hp, proto.mp, proto.crit, proto.steal, proto.dodge, proto.elem);
+    auto it = GEN_KEYS.find(buf);
+    if (it != GEN_KEYS.end()) return it->second;
+    if ((int)ITEMS.size() >= STATIC_ITEMS + 3900) return proto.base;
+    Item n = proto;
+    n.id = (int)ITEMS.size();
+    ITEMS.push_back(n);
+    GEN_KEYS[buf] = n.id;
+    return n.id;
+}
+Item buildGen(int baseId, int rarity, int atk, int def, int hp, int mp, int crit, int steal, int dodge, int elem, int price) {
+    Item n = ITEMS[baseId];
+    n.base = baseId; n.rarity = rarity; n.atk = atk; n.def = def; n.hp = hp; n.mp = mp;
+    n.crit = crit; n.steal = steal; n.dodge = dodge; n.elem = elem; n.price = price;
+    n.name = ITEMS[baseId].name + (elem ? string(" ") + EL_SUFFIX[elem] : string("")) + " [" + RAR_TAG[rarity] + "]";
+    n.desc = "Предмет со случайными свойствами.";
+    return n;
+}
+int rollGear(int baseId, int rarity) {
+    if (rarity <= 0 || baseId <= 0 || baseId >= STATIC_ITEMS || !isEquip(ITEMS[baseId].type)) return baseId;
+    const Item b = ITEMS[baseId];
+    double mult = rarity == 1 ? 1.15 : rarity == 2 ? 1.35 : 1.6;
+    int atk = (int)(b.atk * mult + 0.5), def = (int)(b.def * mult + 0.5);
+    int hp = (int)(b.hp * mult + 0.5), mp = (int)(b.mp * mult + 0.5);
+    int crit = 0, steal = 0, dodge = 0, elem = 0;
+    vector<int> pool;  // 0 атк, 1 защ, 2 HP, 3 MP, 4 крит, 5 вампиризм, 6 уклонение, 7 стихия
+    if (b.type == WEAPON) pool = {0, 4, 5, 7, 3};
+    else if (b.type == ARMOR) pool = {1, 2, 6, 3};
+    else pool = {2, 3, 4, 6, 0};
+    shuffle(pool.begin(), pool.end(), rng);
+    int n = min((int)pool.size(), rarity);
+    for (int i = 0; i < n; i++) {
+        switch (pool[i]) {
+            case 0: atk += rnd(2, 3) + rarity; break;
+            case 1: def += rnd(1, 2) + rarity; break;
+            case 2: hp += rnd(8, 12) * rarity; break;
+            case 3: mp += rnd(6, 10) * rarity; break;
+            case 4: crit += 2 + rarity * 2; break;
+            case 5: steal += 4 + rarity * 3; break;
+            case 6: dodge += 2 + rarity * 2; break;
+            default: elem = rnd(1, 5); break;
+        }
+    }
+    int price = b.price * (rarity == 1 ? 2 : rarity == 2 ? 4 : 8) + n * 20;
+    return addGenItem(buildGen(baseId, rarity, atk, def, hp, mp, crit, steal, dodge, elem, price));
+}
+int rollRarity(int bonus) {
+    int r = rnd(1, 100) + bonus;
+    return r >= 99 ? 3 : r >= 92 ? 2 : r >= 70 ? 1 : 0;
+}
+int randomGear(int lvl, int bonus, int minRarity = 0) {
+    vector<int> pool;
+    if (lvl < 4) pool = {I_RUSTY, I_STEEL, I_DAGGER, I_STAFF1, I_LEATHER, I_ROBE, I_CHAIN, I_RING_STR, I_AMULET};
+    else if (lvl < 9) pool = {I_STEEL, I_AXE, I_STAFF2, I_CHAIN, I_PLATE, I_RING_STR, I_AMULET, I_RING_WIS, I_DAGGER, I_ROBE};
+    else pool = {I_AXE, I_MITHRIL, I_STAFF2, I_PLATE, I_RING_STR, I_AMULET, I_RING_WIS, I_CHAIN};
+    int base = pickOne(pool);
+    return rollGear(base, max(minRarity, rollRarity(bonus)));
+}
 
 // ============================================================================
 //  ДАННЫЕ: навыки и классы
@@ -333,6 +440,7 @@ struct Skill {
     double mult;
     bool magic;
     string desc;
+    int elem = 0;
 };
 vector<Skill> SKILLS;
 
@@ -343,13 +451,13 @@ void initSkills() {
         {"Оглушающий удар", 0, 5, 8, S_STUN, 1.2, false, "Шанс оглушить врага"},
         {"Вихрь клинков", 0, 8, 14, S_DMG, 2.8, false, "Разрушительный удар (x2.8)"},
         {"Удар титана", 0, 10, 20, S_DMG, 4.2, false, "Сокрушительный удар (x4.2)"},
-        {"Огненный шар", 1, 1, 6, S_DMG, 2.0, true, "Магический урон (x2.0)"},
+        {"Огненный шар", 1, 1, 6, S_DMG, 2.0, true, "Огонь x2.0, может поджечь", EL_FIRE},
         {"Исцеление", 1, 2, 8, S_HEAL, 2.5, true, "Лечит по силе интеллекта"},
-        {"Ледяная стрела", 1, 4, 9, S_STUN, 1.6, true, "Урон и шанс заморозить"},
-        {"Метеор", 1, 8, 22, S_DMG, 3.6, true, "Небесная кара (x3.6)"},
-        {"Звёздный дождь", 1, 10, 30, S_DMG, 4.8, true, "Сокрушительная магия (x4.8)"},
+        {"Ледяная стрела", 1, 4, 9, S_STUN, 1.6, true, "Лёд x1.6, шанс заморозить", EL_ICE},
+        {"Метеор", 1, 8, 22, S_DMG, 3.6, true, "Огонь x3.6, может поджечь", EL_FIRE},
+        {"Звёздный дождь", 1, 10, 30, S_DMG, 4.8, true, "Молния x4.8", EL_SHOCK},
         {"Удар в спину", 2, 1, 4, S_CRIT, 2.0, false, "Высокий шанс крита"},
-        {"Ядовитый клинок", 2, 3, 6, S_POISON, 1.0, false, "Отравляет врага"},
+        {"Ядовитый клинок", 2, 3, 6, S_POISON, 1.0, false, "Яд: отравляет врага", EL_POISON},
         {"Уклонение", 2, 5, 5, S_GUARD, 0, false, "Уворот от следующей атаки"},
         {"Смертельный танец", 2, 8, 15, S_MULTI, 1.1, false, "Три быстрых удара"},
         {"Тень смерти", 2, 10, 20, S_CRIT, 3.4, false, "Почти всегда критует"},
@@ -380,6 +488,7 @@ struct EnemyT {
     vector<pair<int, int>> drops;  // (предмет, шанс %)
     bool boss;
     int ability;                   // 1 — дыхание огня (каждый 3-й ход), 2 — топот (каждый 4-й)
+    int weak = 0, resist = 0;      // стихия-слабость (x1.5) и сопротивление (x0.6)
 };
 vector<EnemyT> ENEMIES;
 enum EnemyId { E_RAT, E_WOLF, E_GOBLIN, E_BANDIT, E_SPIDER, E_SKELETON, E_TROLL, E_DARKMAGE,
@@ -387,19 +496,19 @@ enum EnemyId { E_RAT, E_WOLF, E_GOBLIN, E_BANDIT, E_SPIDER, E_SKELETON, E_TROLL,
 
 void initEnemies() {
     ENEMIES = {
-        {"Гигантская крыса", 18, 6, 0, 8, 5, 0, {{I_HP_S, 20}, {I_HERB, 20}}, false, 0},
-        {"Серый волк", 30, 8, 1, 14, 8, 0, {{I_PELT, 60}, {I_HP_S, 15}}, false, 0},
-        {"Гоблин", 35, 10, 2, 18, 14, 0, {{I_RUSTY, 10}, {I_HP_S, 20}, {I_HERB, 20}}, false, 0},
-        {"Бандит", 45, 12, 3, 26, 25, 0, {{I_DAGGER, 10}, {I_MP_S, 15}, {I_LEATHER, 10}}, false, 0},
-        {"Гигантский паук", 50, 13, 3, 30, 15, 1, {{I_FANG, 70}}, false, 0},
-        {"Скелет-воин", 60, 15, 5, 40, 20, 0, {{I_ORE, 40}, {I_HP_L, 10}}, false, 0},
-        {"Пещерный тролль", 120, 21, 6, 80, 60, 4, {{I_ORE, 60}, {I_AXE, 8}}, false, 0},
-        {"Тёмный маг", 70, 23, 4, 90, 70, 2, {{I_CRYSTAL, 50}, {I_MP_L, 20}, {I_RING_WIS, 5}}, false, 0},
-        {"Горный огр", 160, 27, 9, 130, 90, 3, {{I_ORE, 70}, {I_CHAIN, 12}, {I_HP_L, 30}}, false, 0},
-        {"Каменный голем", 220, 29, 14, 180, 120, 0, {{I_CRYSTAL, 80}, {I_PLATE, 6}}, false, 0},
-        {"ДРАКОН ИГНАТОР", 650, 46, 16, 1000, 1000, 3, {}, true, 1},
-        {"Король троллей Грок", 340, 29, 10, 450, 400, 4, {{I_TROLLCROWN, 100}, {I_TROLLCLUB, 35}, {I_ORE, 100}}, true, 2},
-        {"Мимик", 90, 19, 8, 60, 150, 0, {{I_CRYSTAL, 60}, {I_HP_L, 40}}, false, 0},
+        {"Гигантская крыса", 18, 6, 0, 8, 5, 0, {{I_HP_S, 20}, {I_HERB, 20}}, false, 0, 3, 0},
+        {"Серый волк", 30, 8, 1, 14, 8, 0, {{I_PELT, 60}, {I_HP_S, 15}}, false, 0, 1, 0},
+        {"Гоблин", 35, 10, 2, 18, 14, 0, {{I_RUSTY, 10}, {I_HP_S, 20}, {I_HERB, 20}}, false, 0, 2, 0},
+        {"Бандит", 45, 12, 3, 26, 25, 0, {{I_DAGGER, 10}, {I_MP_S, 15}, {I_LEATHER, 10}}, false, 0, 5, 0},
+        {"Гигантский паук", 50, 13, 3, 30, 15, 1, {{I_FANG, 70}}, false, 0, 1, 3},
+        {"Скелет-воин", 60, 15, 5, 40, 20, 0, {{I_ORE, 40}, {I_HP_L, 10}}, false, 0, 4, 3},
+        {"Пещерный тролль", 120, 21, 6, 80, 60, 4, {{I_ORE, 60}, {I_AXE, 8}}, false, 0, 1, 2},
+        {"Тёмный маг", 70, 23, 4, 90, 70, 2, {{I_CRYSTAL, 50}, {I_MP_L, 20}, {I_RING_WIS, 5}}, false, 0, 4, 5},
+        {"Горный огр", 160, 27, 9, 130, 90, 3, {{I_ORE, 70}, {I_CHAIN, 12}, {I_HP_L, 30}}, false, 0, 5, 3},
+        {"Каменный голем", 220, 29, 14, 180, 120, 0, {{I_CRYSTAL, 80}, {I_PLATE, 6}}, false, 0, 2, 3},
+        {"ДРАКОН ИГНАТОР", 650, 46, 16, 1000, 1000, 3, {}, true, 1, 2, 1},
+        {"Король троллей Грок", 340, 29, 10, 450, 400, 4, {{I_TROLLCROWN, 100}, {I_TROLLCLUB, 35}, {I_ORE, 100}}, true, 2, 1, 3},
+        {"Мимик", 90, 19, 8, 60, 150, 0, {{I_CRYSTAL, 60}, {I_HP_L, 40}}, false, 0, 5, 0},
     };
 }
 
@@ -482,6 +591,9 @@ vector<Recipe> ALCH = {
     {I_ANTIDOTE, {{I_HERB, 2}, {I_FANG, 1}}, 0},
     {I_BOMB, {{I_ORE, 1}, {I_CRYSTAL, 1}}, 10},
     {I_ELIXIR, {{I_HERB, 5}, {I_MOONFLOWER, 3}, {I_CRYSTAL, 1}}, 40},
+    {I_ICEBOMB, {{I_CRYSTAL, 1}, {I_MOONFLOWER, 1}}, 10},
+    {I_ACID, {{I_FANG, 2}, {I_HERB, 1}}, 5},
+    {I_HOLYWATER, {{I_MOONFLOWER, 2}, {I_CRYSTAL, 1}}, 15},
 };
 
 struct Comp {
@@ -496,7 +608,7 @@ vector<Comp> COMPS = {
 };
 
 enum { A_FIRST, A_HUNTER, A_VET, A_MASTER, A_DRAGON, A_KING, A_RICH, A_ELITE, A_ARENA,
-       A_SMITH, A_ALCH, A_FRIEND, A_GAMBLER, A_COLLECTOR, A_COUNT };
+       A_SMITH, A_ALCH, A_FRIEND, A_GAMBLER, A_COLLECTOR, A_LEGEND, A_DEPTH, A_DEEP, A_COUNT };
 struct Ach { string name, desc; };
 vector<Ach> ACHS = {
     {"Первая кровь", "Победите первого врага"},
@@ -513,6 +625,9 @@ vector<Ach> ACHS = {
     {"Друг деревни", "Репутация 50"},
     {"Азартный игрок", "Выиграйте в кости 5 раз"},
     {"Коллекционер", "Убейте врагов всех видов (бестиарий)"},
+    {"Легенда", "Найдите легендарный предмет"},
+    {"Исследователь Бездны", "Пройдите 5 этажей Бездны"},
+    {"Покоритель Бездны", "Пройдите 10 этажей Бездны"},
 };
 
 // ============================================================================
@@ -548,9 +663,10 @@ struct Player {
     int blessFights = 0, nextBuff = 0;
     unsigned ach = 0;
     int eliteKills = 0, diceWins = 0, arenaWins = 0;
+    int maxHit = 0, bestFloor = 0;
     vector<int> beast;
     // временные боевые статусы
-    int poison = 0, buff = 0, stun = 0;
+    int poison = 0, buff = 0, stun = 0, burn = 0;
     bool guard = false;
 
     int maxHp() const { int v = baseHp; for (int i = 0; i < 3; i++) v += ITEMS[eq[i]].hp; return v; }
@@ -559,8 +675,11 @@ struct Player {
     int attack() const { return str + equipAtk() + (buff > 0 ? str / 2 + 2 : 0); }
     int defense() const { int v = def; for (int i = 0; i < 3; i++) v += ITEMS[eq[i]].def; return v; }
     int magic() const { return intl + equipAtk() / 2; }
-    int critChance() const { return min(60, 5 + agi / 2 + (cls == 2 ? 10 : 0)); }
-    int dodge() const { return min(40, agi + (weather == WX_FOG ? 10 : 0)); }
+    int eqSum(int Item::*f) const { int v = 0; for (int i = 0; i < 3; i++) v += ITEMS[eq[i]].*f; return v; }
+    int steal() const { return eqSum(&Item::steal); }
+    int weaponElem() const { return ITEMS[eq[0]].elem; }
+    int critChance() const { return min(60, 5 + agi / 2 + (cls == 2 ? 10 : 0) + eqSum(&Item::crit)); }
+    int dodge() const { return min(40, agi + eqSum(&Item::dodge) + (weather == WX_FOG ? 10 : 0)); }
     int hour() const { return tick % 24; }
     int day() const { return tick / 24 + 1; }
     bool night() const { return hour() >= 20 || hour() < 6; }
@@ -633,6 +752,8 @@ void checkAch(Player& p) {
     bool all = true;
     for (int i = 0; i <= E_GOLEM; i++) if (p.beast[i] == 0) all = false;
     if (all) unlockAch(p, A_COLLECTOR);
+    if (p.bestFloor >= 5) unlockAch(p, A_DEPTH);
+    if (p.bestFloor >= 10) unlockAch(p, A_DEEP);
 }
 
 // ============================================================================
@@ -659,8 +780,9 @@ void drawEquipment(const Player& p) {
     for (int i = 0; i < 3; i++) {
         string s = gray(slots[i]) + "  " + (p.eq[i] ? itemName(p.eq[i]) : gray("—"));
         if (i == 0 && p.sharp) s += yellow(" +" + to_string(p.sharp));
-        if (p.eq[i]) s += gray("  (" + statsStr(ITEMS[p.eq[i]]) + ")");
-        v.push_back(s);
+        string st = p.eq[i] ? gray("(" + statsStr(ITEMS[p.eq[i]]) + ")") : "";
+        if (!st.empty() && vlen(s) + 2 + vlen(st) <= W - 2) v.push_back(s + "  " + st);
+        else { v.push_back(s); if (!st.empty()) v.push_back("            " + st); }
     }
     panel("Снаряжение", v, Col::YELLOW);
 }
@@ -681,7 +803,10 @@ void characterSheet(const Player& p) {
     v.push_back(green("Пассивка: ") + CLASSES[p.cls].passive.substr(0, CLASSES[p.cls].passive.find(':')));
     v.push_back(gray(CLASSES[p.cls].passive.substr(CLASSES[p.cls].passive.find(':') + 2)));
     v.push_back("Репутация: " + bold(to_string(p.rep)) + gray(" (" + repTitle(p.rep) + ", скидка " + to_string(p.discount()) + "%)"));
-    v.push_back("Убито врагов: " + bold(to_string(p.kills)));
+    v.push_back("Убито врагов: " + bold(to_string(p.kills)) + gray("   Рекорд удара: ") + bold(to_string(p.maxHit)) +
+                gray("   Бездна: ") + bold(p.bestFloor ? to_string(p.bestFloor) + " эт." : string("—")));
+    if (p.steal() > 0) v.push_back("Вампиризм: " + green(to_string(p.steal()) + "%") + gray(" от нанесённого урона"));
+    if (p.weaponElem()) v.push_back("Стихия оружия: " + elemStr(p.weaponElem()));
     if (p.comp >= 0) v.push_back("Спутник: " + cyan(COMPS[p.comp].name));
     panel("Персонаж", v, Col::GREEN);
     drawEquipment(p);
@@ -742,17 +867,25 @@ void equipItem(Player& p, int id) {
     const Item& it = ITEMS[id];
     int slot = it.type == WEAPON ? 0 : it.type == ARMOR ? 1 : 2;
     if (!p.take(id)) return;
+    int a0 = p.attack(), d0 = p.defense(), h0 = p.maxHp(), c0 = p.critChance();
     if (p.eq[slot]) p.add(p.eq[slot]);
     p.eq[slot] = id;
     p.clampVitals();
     good("Экипировано: " + itemName(id) + gray(" (" + statsStr(it) + ")"));
+    auto diff = [](const string& n, int a, int b) {
+        if (a == b) return string("");
+        return n + " " + to_string(a) + " → " + (b > a ? green(to_string(b)) : red(to_string(b))) + "  ";
+    };
+    string cmp = diff("Атака", a0, p.attack()) + diff("Защита", d0, p.defense()) + diff("HP", h0, p.maxHp()) +
+                 diff("Крит%", c0, p.critChance());
+    if (!cmp.empty()) note(cmp);
 }
 void unequipMenu(Player& p) {
     const char* slots[3] = {"Оружие", "Броня", "Аксессуар"};
     vector<string> c;
     for (int i = 0; i < 3; i++) c.push_back(key(i + 1, string(slots[i]) + ": " + (p.eq[i] ? itemName(p.eq[i]) : gray("—"))));
     c.push_back(key(0, "Назад"));
-    grid(c, 2);
+    grid(c, 1);
     int k = askInt(0, 3);
     if (k == 0 || !p.eq[k - 1]) return;
     p.add(p.eq[k - 1]);
@@ -772,8 +905,10 @@ void inventoryMenu(Player& p) {
         vector<string> v;
         for (size_t i = 0; i < ids.size(); i++) {
             const Item& it = ITEMS[ids[i]];
-            v.push_back(padR(key((int)i + 1, itemName(ids[i]) + gray(" x" + to_string(p.inv[ids[i]]))), 34) +
-                        gray(statsStr(it)));
+            string l = key((int)i + 1, itemName(ids[i]) + gray(" x" + to_string(p.inv[ids[i]])));
+            string st = gray(statsStr(it));
+            if (vlen(l) < 34 && 34 + vlen(st) <= W - 2) v.push_back(padR(l, 34) + st);
+            else { v.push_back(l); v.push_back("      " + st); }
         }
         if (ids.empty()) v.push_back(gray("(пусто)"));
         v.push_back("");
@@ -799,28 +934,32 @@ void inventoryMenu(Player& p) {
 // ============================================================================
 struct Foe {
     string name, affix;
-    int tmpl, hp, maxhp, atk, def, xp, gold, special, ability;
+    int tmpl, hp, maxhp, atk, def, xp, gold, special, ability, weak, resist;
     bool boss, elite;
     vector<pair<int, int>> drops;
+    int lootBonus = 0;            // сдвиг шанса редкой экипировки
+    bool guaranteedGear = false;  // гарантированная экипировка
 };
+void applyElite(Foe& f) {
+    f.elite = true;
+    switch (rnd(0, 3)) {
+        case 0: f.atk = f.atk * 125 / 100; f.affix = "Свирепость: атака +25%"; break;
+        case 1: f.maxhp = f.hp = f.maxhp * 150 / 100; f.affix = "Мощь: здоровье +50%"; break;
+        case 2: f.def += 3 + f.def / 4; f.affix = "Закалка: броня выше"; break;
+        default: f.gold *= 3; f.affix = "Алчность: много золота"; break;
+    }
+}
 Foe makeFoe(int ei) {
     const EnemyT& t = ENEMIES[ei];
     Foe f;
     f.name = t.name; f.affix = ""; f.tmpl = ei;
     f.maxhp = f.hp = t.hp; f.atk = t.atk; f.def = t.def; f.xp = t.xp; f.gold = t.gold;
     f.special = t.special; f.ability = t.ability; f.boss = t.boss; f.elite = false; f.drops = t.drops;
+    f.weak = t.weak; f.resist = t.resist;
     if (!t.boss) {
         f.maxhp = f.hp = max(1, t.hp * rnd(90, 110) / 100);
         f.atk = max(1, t.atk * rnd(95, 105) / 100);
-        if (chance(15)) {
-            f.elite = true;
-            switch (rnd(0, 3)) {
-                case 0: f.atk = f.atk * 125 / 100; f.affix = "Свирепость: атака +25%"; break;
-                case 1: f.maxhp = f.hp = f.maxhp * 150 / 100; f.affix = "Мощь: здоровье +50%"; break;
-                case 2: f.def += 3 + f.def / 4; f.affix = "Закалка: броня выше"; break;
-                default: f.gold *= 3; f.affix = "Алчность: много золота"; break;
-            }
-        }
+        if (chance(15)) applyElite(f);
     }
     return f;
 }
@@ -847,6 +986,18 @@ void levelUp(Player& p) {
     }
 }
 
+void receiveGear(Player& p, int id, vector<string>* log) {
+    p.add(id);
+    const Item& it = ITEMS[id];
+    if (log) {
+        log->push_back("Добыча: " + itemName(id));
+        if (it.rarity > 0) log->push_back("   " + gray(statsStr(it)));
+    } else {
+        gain("Найдено: " + itemName(id) + (it.rarity > 0 ? gray(" (" + statsStr(it) + ")") : string("")));
+    }
+    if (it.rarity >= 3) unlockAch(p, A_LEGEND);
+}
+
 void giveRewards(Player& p, const Foe& f) {
     p.ensureBeast();
     int xp = f.xp, gold = f.gold + rnd(0, f.gold / 2);
@@ -868,10 +1019,17 @@ void giveRewards(Player& p, const Foe& f) {
     v.push_back("Опыт: " + yellow("+" + to_string(xp)) + "    Золото: " + yellow("+" + to_string(gold)));
     p.xp += xp; p.gold += gold; p.kills++;
     if (f.tmpl >= 0 && f.tmpl < (int)p.beast.size()) p.beast[f.tmpl]++;
+    int lootBonus = (f.elite ? 6 : 0) + f.lootBonus;
     for (auto& d : f.drops) {
         int ch = f.elite ? min(100, d.second * 3 / 2) : d.second;
-        if (chance(ch)) { p.add(d.first); v.push_back("Добыча: " + itemName(d.first)); }
+        if (!chance(ch)) continue;
+        int id = d.first;
+        if (isEquip(ITEMS[id].type) && id != I_TROLLCROWN && id != I_TROLLCLUB) id = rollGear(id, rollRarity(lootBonus));
+        if (isEquip(ITEMS[id].type)) receiveGear(p, id, &v);
+        else { p.add(id); v.push_back("Добыча: " + itemName(id)); }
     }
+    if ((f.elite && chance(35)) || f.guaranteedGear) receiveGear(p, randomGear(p.level, lootBonus, f.guaranteedGear ? 1 : 0), &v);
+    if (f.tmpl == E_DRAGON || f.tmpl == E_TROLLKING) receiveGear(p, randomGear(p.level, 18, 2), &v);
     if (f.elite && chance(50)) {
         int extra = pickOne(vector<int>{I_HP_S, I_MP_S, I_HP_L, I_BOMB, I_CRYSTAL});
         p.add(extra);
@@ -899,22 +1057,37 @@ void giveRewards(Player& p, const Foe& f) {
     checkAch(p);
 }
 
-void drawCombat(const Player& p, const Foe& f, int ePoison, int eStun) {
+double elemMult(const Foe& f, int el) {
+    if (el == EL_PHYS) return 1.0;
+    if (f.weak == el) return 1.5;
+    if (f.resist == el) return 0.6;
+    return 1.0;
+}
+
+void drawCombat(const Player& p, const Foe& f, int ePoison, int eStun, int eBurn, int charge, bool known) {
     vector<string> v;
     string nm = f.boss ? magenta(bold(f.name)) : red(bold(string(f.elite ? "★ " : "") + f.name));
     string et;
     if (ePoison) et += green("[яд] ");
+    if (eBurn) et += orange("[горит] ");
     if (eStun) et += yellow("[оглушён]");
     v.push_back(lr(nm, et));
     v.push_back(bar(f.hp, f.maxhp, 36, hpColor(f.hp, f.maxhp)) + " " + to_string(max(0, f.hp)) + "/" + to_string(f.maxhp));
+    if (known) {
+        string wk = "Слабость: " + (f.weak ? elemStr(f.weak) : gray("нет"));
+        if (f.resist) wk += "   Сопротивление: " + elemStr(f.resist);
+        v.push_back(wk);
+    } else v.push_back(gray("Слабость: ???  (изучается: 3 победы или удачный удар)"));
     v.push_back(gray(rep("┄", W - 2)));
     string pt;
     if (p.poison) pt += green("[яд] ");
+    if (p.burn) pt += orange("[горю] ");
     if (p.buff) pt += yellow("[сила] ");
     if (p.guard) pt += cyan("[уклонение]");
     v.push_back(lr(bold(p.name) + gray(" " + CLASSES[p.cls].name), pt));
     v.push_back("HP " + bar(p.hp, p.maxHp(), 28, hpColor(p.hp, p.maxHp())) + " " + to_string(max(0, p.hp)) + "/" + to_string(p.maxHp()));
     v.push_back("MP " + bar(p.mp, p.maxMp(), 28, Col::BLUE) + " " + to_string(p.mp) + "/" + to_string(p.maxMp()));
+    v.push_back("Пр " + bar(charge, 100, 28, Col::ORANGE) + " " + (charge >= 100 ? yellow("ГОТОВ!") : to_string(charge) + "%"));
     if (p.comp >= 0) v.push_back(gray("Спутник: " + COMPS[p.comp].name));
     cout << "\n";
     panel("Бой", v, f.boss ? Col::MAGENTA : Col::RED);
@@ -922,11 +1095,13 @@ void drawCombat(const Player& p, const Foe& f, int ePoison, int eStun) {
 
 // Возвращает: 1 — победа, 0 — смерть, 2 — бегство
 int combat(Player& p, Foe f, bool arena = false) {
-    int ePoison = 0, eStun = 0, eTurn = 0;
+    int ePoison = 0, eStun = 0, eBurn = 0, eTurn = 0, charge = 20;
     bool enraged = false;
+    p.ensureBeast();
+    bool known = f.tmpl >= 0 && f.tmpl < (int)p.beast.size() && p.beast[f.tmpl] >= 3;
     int eatk = f.atk * (p.night() ? 115 : 100) / 100;
     int period = f.ability == 1 ? 3 : f.ability == 2 ? 4 : 0;
-    p.poison = 0; p.stun = 0; p.guard = false;
+    p.poison = 0; p.stun = 0; p.burn = 0; p.guard = false;
     p.buff = p.nextBuff; p.nextBuff = 0;
 
     cout << "\n";
@@ -938,13 +1113,34 @@ int combat(Player& p, Foe f, bool arena = false) {
     if (period) warnMsg("Босс готовит особые атаки — следите за предупреждениями!");
 
     int result = -1;
+    auto addCharge = [&](int n) { charge = min(100, charge + n); };
     auto hurt = [&](int d, const string& src) {
         if (p.cls == 0) d = max(1, d * 90 / 100);
         p.hp -= d;
+        addCharge(12);
         say(red(src) + " наносит вам " + red(bold(to_string(d))) + " урона.");
     };
+    // удар игрока по врагу: учитывает стихии, вампиризм и поджог
+    auto hit = [&](double raw, int el, bool magic, bool canSteal) {
+        double m = elemMult(f, el);
+        int d = calcDmg(raw * m, magic ? f.def / 2 : f.def);
+        f.hp -= d;
+        p.maxHit = max(p.maxHit, d);
+        if (m > 1.0) { known = true; say(orange("Слабость! ") + elemStr(el) + gray(" x1.5")); }
+        else if (m < 1.0) { known = true; say(gray("Сопротивление: ") + elemStr(el) + gray(" x0.6")); }
+        if (canSteal && p.steal() > 0) {
+            int h = min(p.maxHp() - p.hp, max(1, d * p.steal() / 100));
+            if (h > 0) { p.hp += h; say(green("Вампиризм: +" + to_string(h) + " HP")); }
+        }
+        if (el == EL_FIRE && eBurn == 0 && f.resist != EL_FIRE && f.hp > 0 && chance(35)) {
+            eBurn = 3;
+            say(orange("Враг загорается!"));
+        }
+        return d;
+    };
+
     while (result < 0) {
-        drawCombat(p, f, ePoison, eStun);
+        drawCombat(p, f, ePoison, eStun, eBurn, charge, known);
         bool acted = false;
         if (p.stun > 0) {
             bad("Вы оглушены и пропускаете ход!");
@@ -952,14 +1148,15 @@ int combat(Player& p, Foe f, bool arena = false) {
             acted = true;
         }
         while (!acted) {
-            grid({key(1, "Атака"), key(2, "Навык"), key(3, "Предмет"), key(4, "Бегство")}, 4);
-            int c = askInt(1, 4);
+            string ultLbl = charge >= 100 ? yellow("Приём ★ГОТОВ") : gray("Приём " + to_string(charge) + "%");
+            grid({key(1, "Атака"), key(2, "Навык"), key(3, "Предмет"), key(4, "Бегство"), key(5, ultLbl)}, 3);
+            int c = askInt(1, 5);
             if (c == 1) {
                 bool crit = chance(p.critChance());
-                int d = calcDmg(p.attack() * (crit ? 1.7 : 1.0), f.def);
-                f.hp -= d;
+                int d = hit(p.attack() * (crit ? 1.7 : 1.0), p.weaponElem(), false, true);
                 if (crit) say(yellow("КРИТИЧЕСКИЙ УДАР! ") + "Вы наносите " + red(bold(to_string(d))));
                 else say("Вы бьёте врага: " + red(to_string(d)));
+                addCharge(10);
                 acted = true;
             } else if (c == 2) {
                 vector<const Skill*> av;
@@ -975,37 +1172,40 @@ int combat(Player& p, Foe f, bool arena = false) {
                 if (p.mp < s.cost) { bad("Не хватает маны!"); continue; }
                 p.mp -= s.cost;
                 double base = s.magic ? p.magic() * (p.weather == WX_STORM ? 1.15 : 1.0) : p.attack();
-                say(cyan("» " + s.name));
+                int el = s.elem ? s.elem : (s.magic ? (int)EL_PHYS : p.weaponElem());
+                say(cyan("» " + s.name) + (s.elem ? " " + elemStr(s.elem) : string("")));
                 switch (s.kind) {
                     case S_DMG: {
-                        int d = calcDmg(base * s.mult, s.magic ? f.def / 2 : f.def);
-                        f.hp -= d; say("Урон: " + red(bold(to_string(d))));
+                        int d = hit(base * s.mult, el, s.magic, true);
+                        say("Урон: " + red(bold(to_string(d))));
                         break;
                     }
                     case S_STUN: {
-                        int d = calcDmg(base * s.mult, f.def);
-                        f.hp -= d; say("Урон: " + red(bold(to_string(d))));
-                        if (chance(f.boss ? 25 : 65)) { eStun = 1; good("Враг оглушён!"); }
-                        else if (f.boss) note("Босс сопротивляется оглушению.");
+                        int d = hit(base * s.mult, el, s.magic, true);
+                        say("Урон: " + red(bold(to_string(d))));
+                        if (f.hp > 0) {
+                            if (chance(f.boss ? 25 : (el == EL_ICE ? 70 : 65))) { eStun = 1; good(el == EL_ICE ? "Враг заморожен!" : "Враг оглушён!"); }
+                            else if (f.boss) note("Босс сопротивляется оглушению.");
+                        }
                         break;
                     }
                     case S_CRIT: {
                         bool crit = chance(min(95, 50 + p.agi / 2 + (s.mult > 3 ? 25 : 0)));
-                        int d = calcDmg(base * s.mult * (crit ? 1.8 : 1.0), f.def);
-                        f.hp -= d;
+                        int d = hit(base * s.mult * (crit ? 1.8 : 1.0), el, false, true);
                         say((crit ? yellow("КРИТ! ") : string("")) + "Урон: " + red(bold(to_string(d))));
                         break;
                     }
                     case S_POISON: {
-                        int d = calcDmg(base * s.mult, f.def);
-                        f.hp -= d; ePoison = 4;
-                        say("Урон: " + red(to_string(d)) + ". Враг " + green("отравлен") + "!");
+                        int d = hit(base * s.mult, el, false, true);
+                        say("Урон: " + red(to_string(d)));
+                        if (f.resist == EL_POISON) note("Враг устойчив к яду.");
+                        else { ePoison = 4; say("Враг " + green("отравлен") + "!"); }
                         break;
                     }
                     case S_MULTI: {
                         int tot = 0;
-                        for (int i = 0; i < 3; i++) tot += calcDmg(base * s.mult, f.def);
-                        f.hp -= tot; say("Три удара, суммарный урон: " + red(bold(to_string(tot))));
+                        for (int i = 0; i < 3; i++) tot += hit(base * s.mult, el, false, true);
+                        say("Три удара, суммарный урон: " + red(bold(to_string(tot))));
                         break;
                     }
                     case S_HEAL: {
@@ -1016,6 +1216,7 @@ int combat(Player& p, Foe f, bool arena = false) {
                     case S_BUFF: p.buff = 4; good("Ваша сила растёт на 4 хода!"); break;
                     case S_GUARD: p.guard = true; good("Вы готовитесь уклониться."); break;
                 }
+                addCharge(12);
                 acted = true;
             } else if (c == 3) {
                 vector<int> ids;
@@ -1027,22 +1228,45 @@ int combat(Player& p, Foe f, bool arena = false) {
                 int k = askInt(0, (int)ids.size());
                 if (k == 0) continue;
                 int id = ids[k - 1];
-                const Item& it = ITEMS[id];
+                const Item it = ITEMS[id];
                 if (it.type == BOMB) {
                     p.take(id);
-                    int d = calcDmg(it.hp * (0.9 + rnd(0, 20) / 100.0), f.def / 2);
-                    f.hp -= d;
-                    say(orange("Бомба взрывается!") + " Урон: " + red(bold(to_string(d))));
+                    say(orange("Бросок: ") + it.name);
+                    int d = hit(it.hp * (0.9 + rnd(0, 20) / 100.0), it.elem, true, false);
+                    say("Урон: " + red(bold(to_string(d))));
                 } else if (it.type == CURE) {
-                    if (!p.poison) { note("Вы не отравлены."); continue; }
-                    p.take(id); p.poison = 0; good("Яд нейтрализован.");
+                    if (!p.poison && !p.burn) { note("Вы не отравлены и не горите."); continue; }
+                    p.take(id); p.poison = 0; p.burn = 0; good("Яд и огонь сняты.");
                 } else useConsumable(p, id);
                 acted = true;
-            } else {
+            } else if (c == 4) {
                 if (f.boss || arena) { bad(arena ? "С арены не сбежать!" : "От такого врага не убежать!"); continue; }
                 int fc = min(85, 40 + p.agi + (p.weather == WX_RAIN ? 15 : 0));
                 if (chance(fc)) { good("Вам удалось сбежать!"); result = 2; break; }
                 bad("Побег не удался!");
+                acted = true;
+            } else {
+                if (charge < 100) { bad("Приём ещё не заряжен (" + to_string(charge) + "/100). Заряд растёт от ударов и полученного урона."); continue; }
+                charge = 0;
+                if (p.cls == 0) {
+                    say(orange(bold("» БЕРСЕРК!")));
+                    int d = hit(p.attack() * 3.2, p.weaponElem(), false, true);
+                    say("Урон: " + red(bold(to_string(d))));
+                    int h = min(p.maxHp() - p.hp, p.maxHp() * 15 / 100);
+                    p.hp += h; good("Ярость лечит вас: +" + to_string(h) + " HP.");
+                } else if (p.cls == 1) {
+                    say(orange(bold("» АРКАННЫЙ ВЗРЫВ!")));
+                    int d = hit(p.magic() * 4.0 * (p.weather == WX_STORM ? 1.15 : 1.0), EL_SHOCK, true, false);
+                    say("Урон: " + red(bold(to_string(d))));
+                    int m = min(p.maxMp() - p.mp, p.maxMp() * 30 / 100);
+                    p.mp += m; good("Магия возвращается: +" + to_string(m) + " MP.");
+                } else {
+                    say(orange(bold("» ТАНЕЦ ТЕНЕЙ!")));
+                    int tot = 0;
+                    for (int i = 0; i < 5; i++) tot += hit(p.attack() * (chance(60) ? 1.8 : 1.0), p.weaponElem(), false, true);
+                    say("Пять ударов, суммарный урон: " + red(bold(to_string(tot))));
+                    p.guard = true; good("Вы растворяетесь в тенях — следующая атака пройдёт мимо.");
+                }
                 acted = true;
             }
         }
@@ -1055,20 +1279,25 @@ int combat(Player& p, Foe f, bool arena = false) {
             if (c.kind == 0) {
                 int d = max(1, 4 + p.level * 2 + rnd(0, p.level) - f.def / 4);
                 f.hp -= d;
-                say(cyan(c.name) + " стреляет в врага: " + red(to_string(d)));
+                say(cyan(c.name) + " стреляет во врага: " + red(to_string(d)));
             } else if (c.kind == 1) {
                 int h = min(p.maxHp() - p.hp, p.maxHp() * 7 / 100 + p.level);
                 if (h > 0) { p.hp += h; say(cyan(c.name) + " лечит вас: " + green("+" + to_string(h))); }
             }
             if (f.hp <= 0) { giveRewards(p, f); result = 1; break; }
         }
-        // яд на враге
+        // яд и огонь на враге
         if (ePoison > 0) {
             int d = 4 + p.level;
             f.hp -= d; ePoison--;
             say(f.name + " страдает от яда: " + red("-" + to_string(d)));
-            if (f.hp <= 0) { giveRewards(p, f); result = 1; break; }
         }
+        if (eBurn > 0) {
+            int d = 3 + p.level + f.maxhp / 50;
+            f.hp -= d; eBurn--;
+            say(f.name + " " + orange("горит") + ": " + red("-" + to_string(d)));
+        }
+        if (f.hp <= 0) { giveRewards(p, f); result = 1; break; }
         // фаза ярости дракона
         if (f.ability == 1 && !enraged && f.hp * 2 < f.maxhp) {
             enraged = true;
@@ -1077,7 +1306,7 @@ int combat(Player& p, Foe f, bool arena = false) {
         }
         // ход врага
         if (eStun > 0) {
-            say(f.name + " оглушён и пропускает ход.");
+            say(f.name + " не может двигаться и пропускает ход.");
             eStun--;
         } else {
             eTurn++;
@@ -1090,7 +1319,11 @@ int combat(Player& p, Foe f, bool arena = false) {
             if (ult && f.ability == 1) {
                 say(red(bold("Игнатор изрыгает ПОТОК ОГНЯ!")));
                 if (p.guard) { good("Вы нырнули под пламя и остались невредимы!"); p.guard = false; }
-                else hurt(max(5, (int)(eatk * 1.7) - p.defense() / 4), "Пламя");
+                else {
+                    hurt(max(5, (int)(eatk * 1.7) - p.defense() / 4), "Пламя");
+                    p.burn = 3;
+                    bad("Вы охвачены огнём!");
+                }
             } else if (ult && f.ability == 2) {
                 say(red(bold(f.name + " обрушивает ТОПОТ!")));
                 if (p.guard) { good("Вы отпрыгнули от ударной волны!"); p.guard = false; }
@@ -1104,9 +1337,9 @@ int combat(Player& p, Foe f, bool arena = false) {
                 else if (p.guard) { good("Вы ловко уклоняетесь от атаки!"); p.guard = false; }
                 else if (chance(p.dodge())) {
                     good("Вы уворачиваетесь от атаки " + f.name + "!");
+                    addCharge(8);
                     if (p.cls == 2 && chance(35)) {
-                        int d = calcDmg(p.attack() * 0.6, f.def);
-                        f.hp -= d;
+                        int d = hit(p.attack() * 0.6, p.weaponElem(), false, false);
                         good("Контратака! Урон: " + red(to_string(d)));
                     }
                 } else {
@@ -1130,6 +1363,11 @@ int combat(Player& p, Foe f, bool arena = false) {
             p.hp -= d; p.poison--;
             say(green("Яд") + " наносит вам " + red(to_string(d)) + " урона.");
         }
+        if (p.burn > 0) {
+            int d = 4 + p.level / 2;
+            p.hp -= d; p.burn--;
+            say(orange("Огонь") + " жжёт вас: " + red(to_string(d)));
+        }
         if (p.cls == 1) {
             int m = min(p.maxMp() - p.mp, 2 + p.level / 3);
             if (m > 0) { p.mp += m; say(blue("Поток маны: +" + to_string(m) + " MP")); }
@@ -1138,7 +1376,7 @@ int combat(Player& p, Foe f, bool arena = false) {
         if (f.hp <= 0) { giveRewards(p, f); result = 1; break; }
         if (p.hp <= 0) { result = 0; break; }
     }
-    p.poison = 0; p.buff = 0; p.stun = 0; p.guard = false;
+    p.poison = 0; p.burn = 0; p.buff = 0; p.stun = 0; p.guard = false;
     return result;
 }
 
@@ -1183,7 +1421,7 @@ void shopMenu(Player& p) {
         for (int i = 0; i < 2; i++)
             if (!(p.dealMask & (1 << i))) offers.push_back({deals[i], max(1, ITEMS[deals[i]].price * 70 / 100), i});
         vector<int> stock = {I_RUSTY, I_STEEL, I_DAGGER, I_STAFF1, I_LEATHER, I_ROBE, I_CHAIN,
-                             I_HP_S, I_HP_L, I_MP_S, I_MP_L, I_ANTIDOTE, I_BOMB};
+                             I_HP_S, I_HP_L, I_MP_S, I_MP_L, I_ANTIDOTE, I_BOMB, I_ICEBOMB, I_ACID, I_HOLYWATER};
         if (p.level >= 4 || p.rep >= 20)
             for (int id : {I_AXE, I_STAFF2, I_PLATE, I_RING_STR, I_AMULET, I_RING_WIS}) stock.push_back(id);
         for (int id : stock) offers.push_back({id, max(1, ITEMS[id].price * (100 - p.discount()) / 100), -1});
@@ -1490,6 +1728,7 @@ void arenaMenu(Player& p) {
     p.gold += pot; p.arenaWins++; p.rep += 2;
     banner("ЧЕМПИОН АРЕНЫ!", Col::YELLOW);
     good("Вы получаете " + yellow(to_string(pot)) + " золота. Репутация +2.");
+    receiveGear(p, randomGear(p.level, 10, 1), nullptr);
     checkAch(p);
 }
 
@@ -1620,9 +1859,14 @@ void showBestiary(const Player& p) {
         const EnemyT& e = ENEMIES[i];
         if (k == 0) { v.push_back(gray(padR("???", 24) + "не встречен")); continue; }
         string nm = e.boss ? magenta(e.name) : e.name;
-        string st = k >= 3 ? gray("HP " + to_string(e.hp) + "  АТК " + to_string(e.atk) + "  ЗАЩ " + to_string(e.def))
+        string st = k >= 3 ? gray("HP " + to_string(e.hp) + " АТК " + to_string(e.atk) + " ЗАЩ " + to_string(e.def))
                            : gray("изучено: " + to_string(k) + "/3");
-        v.push_back(padR(nm, 24) + padR(st, 28) + "убито: " + bold(to_string(k)));
+        v.push_back(padR(nm, 22) + padR(st, 26) + "убито: " + bold(to_string(k)));
+        if (k >= 3) {
+            string wk = "   слабость: " + (e.weak ? elemStr(e.weak) : gray("нет"));
+            if (e.resist) wk += "   сопротивление: " + elemStr(e.resist);
+            v.push_back(wk);
+        }
     }
     cout << "\n";
     panel("Бестиарий", v, Col::RED);
@@ -1696,6 +1940,7 @@ void eventChest(Player& p) {
         int g = rnd(15, 40) * max(1, p.level) / 2 + 10;
         p.gold += g;
         gain("В сундуке лежит " + yellow(to_string(g)) + " золота!");
+        if (chance(20)) receiveGear(p, randomGear(p.level, 4), nullptr);
         if (chance(35)) {
             int it = pickOne(vector<int>{I_HP_S, I_MP_S, I_HERB, I_ORE, I_CRYSTAL, I_BOMB});
             p.add(it);
@@ -1927,6 +2172,216 @@ void bossFight(Player& p, int ei) {
 }
 
 // ============================================================================
+//  БЕЗДНА: процедурно генерируемое подземелье
+//  Каждый этаж — 4 комнаты (на выбор две двери со смутной подсказкой) и страж.
+//  Враги и награды растут с глубиной; каждые 3 этажа — контрольная точка.
+// ============================================================================
+enum Door { D_FIGHT, D_ELITE, D_CHEST, D_REST, D_EVENT, D_MERCH };
+const char* DOOR_HINT[] = {
+    "Из темноты доносится рычание",
+    "Воздух дрожит от тяжёлой ауры",
+    "В щели между камнями блестит золото",
+    "Тепло и тихо, пахнет костром",
+    "Слышен странный шёпот",
+    "Звенят монеты и посуда",
+};
+int pickDoor() {
+    int r = rnd(1, 100);
+    return r <= 38 ? D_FIGHT : r <= 50 ? D_ELITE : r <= 66 ? D_CHEST : r <= 76 ? D_REST : r <= 90 ? D_EVENT : D_MERCH;
+}
+
+Foe makeDepthFoe(const Player& p, int floor, bool elite, bool guardian) {
+    vector<int> el;
+    for (int i = 0; i < (int)ENEMIES.size(); i++) {
+        if (ENEMIES[i].boss) continue;
+        int t = enemyTier(i);
+        if (t >= 1 && t <= p.level + floor / 2 + 1) el.push_back(i);
+    }
+    if (el.empty()) el.push_back(E_RAT);
+    int ei;
+    if (guardian) {
+        ei = el[0];
+        for (int e : el) if (ENEMIES[e].hp > ENEMIES[ei].hp) ei = e;
+    } else {
+        int a = pickOne(el), b = pickOne(el);
+        ei = ENEMIES[a].hp >= ENEMIES[b].hp ? a : b;
+    }
+    Foe f = makeFoe(ei);
+    double hs = 1.0 + 0.12 * (floor - 1), as = 1.0 + 0.07 * (floor - 1), rs = 1.0 + 0.2 * (floor - 1);
+    if (guardian) { hs *= 1.6; as *= 1.2; }
+    f.maxhp = f.hp = max(1, (int)(f.hp * hs));
+    f.atk = max(1, (int)(f.atk * as));
+    f.def += floor / 2;
+    f.xp = (int)(f.xp * rs);
+    f.gold = (int)(f.gold * rs);
+    f.lootBonus = floor * 2;
+    if (guardian) {
+        f.name = "Страж: " + f.name;
+        if (!f.elite) applyElite(f);
+        f.guaranteedGear = true;
+        if (f.special == 0) f.special = 3;
+    } else if (elite && !f.elite) {
+        applyElite(f);
+        f.guaranteedGear = chance(60);
+    }
+    return f;
+}
+
+// true — игрок жив
+bool depthFight(Player& p, int floor, bool elite, bool guardian) {
+    return fightFoe(p, makeDepthFoe(p, floor, elite, guardian));
+}
+
+bool depthChest(Player& p, int floor) {
+    say("В нише стоит окованный сундук, покрытый пылью веков.");
+    if (!askYesNo("Открыть?")) { note("Вы проходите мимо."); return true; }
+    int r = rnd(1, 100);
+    if (r <= 15) {
+        warnMsg("Сундук оживает — это " + bold("МИМИК") + "!");
+        Foe f = makeFoe(E_MIMIC);
+        f.maxhp = f.hp = 90 + p.level * 14 + floor * 25;
+        f.atk = 14 + p.level * 2 + floor * 2;
+        f.lootBonus = floor * 2;
+        f.guaranteedGear = true;
+        return fightFoe(p, f);
+    }
+    if (r <= 30) {
+        int d = rnd(5, 10) + p.level * 2 + floor * 2;
+        p.hp = max(1, p.hp - d);
+        bad("Взрывная руна! " + red("-" + to_string(d) + " HP"));
+        return true;
+    }
+    int g = rnd(20, 45) * floor + p.level * 5;
+    p.gold += g;
+    gain("В сундуке лежит " + yellow(to_string(g)) + " золота!");
+    if (chance(40)) receiveGear(p, randomGear(p.level, floor * 2), nullptr);
+    if (chance(30)) {
+        int it = pickOne(vector<int>{I_HP_L, I_MP_L, I_BOMB, I_ICEBOMB, I_ACID, I_HOLYWATER, I_CRYSTAL});
+        p.add(it);
+        gain("А ещё: " + itemName(it));
+    }
+    return true;
+}
+
+void depthRest(Player& p) {
+    int h = p.maxHp() * 35 / 100, m = p.maxMp() * 25 / 100;
+    p.hp = min(p.maxHp(), p.hp + h);
+    p.mp = min(p.maxMp(), p.mp + m);
+    good("Вы немного отдыхаете у чьего-то остывающего костра. " + green("+" + to_string(h) + " HP") + ", " + blue("+" + to_string(m) + " MP"));
+}
+
+void depthMerchant(Player& p, int floor) {
+    int gid = randomGear(p.level, 6 + floor * 2, 1);
+    int price = ITEMS[gid].price;
+    int packPrice = 60 + floor * 10;
+    vector<string> v;
+    v.push_back(gray("Закутанная фигура раскладывает товар на плаще."));
+    v.push_back(key(1, itemName(gid)) + "  " + (p.gold >= price ? yellow(to_string(price)) : gray(to_string(price))) + " зол.");
+    v.push_back("    " + gray(statsStr(ITEMS[gid])));
+    v.push_back(key(2, "Мешок припасов (2 больших зелья, 1 бомба)") );
+    v.push_back("    " + (p.gold >= packPrice ? yellow(to_string(packPrice)) : gray(to_string(packPrice))) + " зол.");
+    v.push_back(key(0, "Уйти"));
+    cout << "\n";
+    panel("Тёмный торговец", v, Col::YELLOW);
+    int c = askInt(0, 2);
+    if (c == 1) {
+        if (p.gold < price) { bad("Не хватает золота."); return; }
+        p.gold -= price;
+        receiveGear(p, gid, nullptr);
+    } else if (c == 2) {
+        if (p.gold < packPrice) { bad("Не хватает золота."); return; }
+        p.gold -= packPrice;
+        p.add(I_HP_L, 2); p.add(I_BOMB, 1);
+        good("Вы получили 2 больших зелья лечения и бомбу.");
+    }
+}
+
+void drawDepthHud(const Player& p, int floor, int room, int rooms) {
+    vector<string> v;
+    v.push_back(lr(bold("Этаж " + to_string(floor)) + gray(room > rooms ? "   зал стража" : "   комната " + to_string(room) + "/" + to_string(rooms)),
+                   gray("пройдено: " + to_string(p.bestFloor)) + "  " + yellow("● " + to_string(p.gold))));
+    v.push_back("HP " + bar(p.hp, p.maxHp(), 30, hpColor(p.hp, p.maxHp())) + " " + to_string(p.hp) + "/" + to_string(p.maxHp()));
+    v.push_back("MP " + bar(p.mp, p.maxMp(), 30, Col::BLUE) + " " + to_string(p.mp) + "/" + to_string(p.maxMp()));
+    cout << "\n";
+    panel("Бездна", v, Col::MAGENTA);
+}
+
+void abyss(Player& p) {
+    cout << "\n";
+    panelText("Бездна",
+              "Древний провал в руинах уходит в самую глубь земли. Каждый этаж — четыре комнаты и страж. "
+              "Враги и награды растут с глубиной. Выход наверх доступен между комнатами, но смерть "
+              "обходится дорого. Каждые 3 пройденных этажа открывают контрольную точку.", Col::MAGENTA);
+    if (p.level < 5 && !askYesNo(orange("Рекомендуемый уровень — 5+.") + " Всё равно спуститься?")) return;
+    int floor = 1;
+    int cp = (p.bestFloor / 3) * 3 + 1;
+    if (cp > 1) {
+        grid({key(1, "С 1 этажа"), key(2, "С этажа " + to_string(cp) + " (контрольная точка)"), key(0, "Отмена")}, 1);
+        int c = askInt(0, 2);
+        if (c == 0) return;
+        if (c == 2) floor = cp;
+    }
+    const int ROOMS = 4;
+    int startLoc = p.loc;
+    bool leave = false;
+    while (!leave) {
+        for (int room = 1; room <= ROOMS && !leave; room++) {
+            int a = pickDoor(), b = pickDoor();
+            for (int t = 0; t < 6 && b == a; t++) b = pickDoor();
+            int c;
+            while (true) {
+                drawDepthHud(p, floor, room, ROOMS);
+                say(key(1, "Левая дверь: " + gray(DOOR_HINT[a])));
+                say(key(2, "Правая дверь: " + gray(DOOR_HINT[b])));
+                grid({key(3, "Инвентарь"), key(4, "Персонаж"), key(5, "Подняться")}, 3);
+                c = askInt(1, 5);
+                if (c == 3) { inventoryMenu(p); continue; }
+                if (c == 4) { characterMenu(p); continue; }
+                if (c == 5 && !askYesNo("Подняться наверх? Прогресс этажа будет потерян.")) continue;
+                break;
+            }
+            if (c == 5) { leave = true; break; }
+            int door = c == 1 ? a : b;
+            passTime(p, 1);
+            cout << "\n";
+            rule("Этаж " + to_string(floor) + " — " + DOOR_HINT[door]);
+            bool alive = true;
+            switch (door) {
+                case D_FIGHT: alive = depthFight(p, floor, false, false); break;
+                case D_ELITE: warnMsg("Это логово сильного противника!"); alive = depthFight(p, floor, true, false); break;
+                case D_CHEST: alive = depthChest(p, floor); break;
+                case D_REST: depthRest(p); break;
+                case D_EVENT: randomEvent(p); break;
+                default: depthMerchant(p, floor); break;
+            }
+            p.clampVitals();
+            if (!alive || p.loc != startLoc) return;  // погибли — спасение уже обработано
+        }
+        if (leave) break;
+        // страж этажа
+        drawDepthHud(p, floor, ROOMS + 1, ROOMS);
+        banner("СТРАЖ ЭТАЖА " + to_string(floor), Col::MAGENTA);
+        if (!depthFight(p, floor, true, true) || p.loc != startLoc) return;
+        p.bestFloor = max(p.bestFloor, floor);
+        int g = floor * 50 + p.level * 10, x = floor * 30;
+        p.gold += g; p.xp += x; p.rep += 1;
+        int h = p.maxHp() * 30 / 100;
+        p.hp = min(p.maxHp(), p.hp + h);
+        panel("Этаж " + to_string(floor) + " пройден!",
+              {"Награда: " + yellow(to_string(g)) + " зол., " + yellow(to_string(x)) + " опыта",
+               green("Короткий отдых: +" + to_string(h) + " HP")}, Col::GREEN);
+        if (floor % 3 == 0) gain("Открыта контрольная точка: следующий спуск можно начать с этажа " + to_string(floor + 1) + ".");
+        levelUp(p);
+        checkAch(p);
+        grid({key(1, "Спуститься на этаж " + to_string(floor + 1)), key(2, "Подняться наверх")}, 1);
+        if (askInt(1, 2) == 2) leave = true;
+        else floor++;
+    }
+    passTime(p, 2);
+    good("Вы выбираетесь из Бездны на поверхность.");
+}
+
+// ============================================================================
 //  Сохранение / загрузка (3 слота + автосохранение)
 // ============================================================================
 string slotFile(int s) { return s == 0 ? "autosave.sav" : "slot" + to_string(s) + ".sav"; }
@@ -1952,6 +2407,17 @@ bool saveGame(const Player& p, int slot) {
     w("bntState", p.bntState); w("bntGold", p.bntGold); w("bntXp", p.bntXp);
     w("bless", p.blessFights); w("nextBuff", p.nextBuff); w("ach", p.ach);
     w("elite", p.eliteKills); w("dice", p.diceWins); w("arena", p.arenaWins);
+    w("maxHit", p.maxHit); w("bestFloor", p.bestFloor);
+    vector<int> gens;  // сгенерированная экипировка, на которую ссылается игрок
+    for (int i = 0; i < 3; i++) if (p.eq[i] >= STATIC_ITEMS) gens.push_back(p.eq[i]);
+    for (auto& kv : p.inv) if (kv.first >= STATIC_ITEMS) gens.push_back(kv.first);
+    sort(gens.begin(), gens.end());
+    gens.erase(unique(gens.begin(), gens.end()), gens.end());
+    for (int id : gens) {
+        const Item& g = ITEMS[id];
+        f << "gen" << id << " " << g.base << " " << g.rarity << " " << g.atk << " " << g.def << " " << g.hp << " "
+          << g.mp << " " << g.crit << " " << g.steal << " " << g.dodge << " " << g.elem << " " << g.price << "\n";
+    }
     f << "inv";
     for (auto& kv : p.inv) f << " " << kv.first << ":" << kv.second;
     f << "\nquest";
@@ -1983,6 +2449,29 @@ bool loadGame(Player& p, int slot) {
         auto it = m.find(k);
         return it == m.end() ? def : toIntSafe(it->second, def);
     };
+    // пересоздаём сгенерированную экипировку и переназначаем её номера
+    ITEMS.erase(ITEMS.begin() + STATIC_ITEMS, ITEMS.end());
+    GEN_KEYS.clear();
+    map<int, int> remap;
+    for (auto& kv : m) {
+        if (kv.first.rfind("gen", 0) != 0 || kv.first.size() < 4) continue;
+        int oldId = toIntSafe(kv.first.substr(3), -1);
+        istringstream is(kv.second);
+        int v[11];
+        bool okv = oldId >= STATIC_ITEMS;
+        for (int i = 0; i < 11 && okv; i++) if (!(is >> v[i])) okv = false;
+        if (!okv) continue;
+        int base = v[0], rar = v[1];
+        if (base <= 0 || base >= STATIC_ITEMS || !isEquip(ITEMS[base].type) || rar < 1 || rar > 3) continue;
+        int elem = max(0, min(5, v[9]));
+        remap[oldId] = addGenItem(buildGen(base, rar, max(0, v[2]), max(0, v[3]), max(0, v[4]), max(0, v[5]),
+                                           max(0, v[6]), max(0, v[7]), max(0, v[8]), elem, max(1, v[10])));
+    }
+    auto mapId = [&](int id) {
+        if (id < STATIC_ITEMS) return id;
+        auto it = remap.find(id);
+        return it == remap.end() ? 0 : it->second;
+    };
     Player q;
     q.name = m.count("name") && !m["name"].empty() ? m["name"] : "Герой";
     q.cls = gi("cls", 0);
@@ -1993,7 +2482,7 @@ bool loadGame(Player& p, int slot) {
     q.str = max(0, gi("str", 1)); q.def = max(0, gi("def", 1));
     q.intl = max(0, gi("intl", 1)); q.agi = max(0, gi("agi", 1));
     for (int i = 0; i < 3; i++) {
-        int id = gi("eq" + to_string(i), 0);
+        int id = mapId(gi("eq" + to_string(i), 0));
         bool ok = id == 0 || (id > 0 && id < (int)ITEMS.size() &&
                               ITEMS[id].type == (i == 0 ? WEAPON : i == 1 ? ARMOR : ACCESSORY));
         q.eq[i] = ok ? id : 0;
@@ -2015,6 +2504,7 @@ bool loadGame(Player& p, int slot) {
     if (q.bntEnemy < 0 || q.bntEnemy >= (int)ENEMIES.size()) q.bntEnemy = 0;
     q.blessFights = max(0, gi("bless", 0)); q.nextBuff = max(0, gi("nextBuff", 0));
     q.ach = (unsigned)gi("ach", 0);
+    q.maxHit = max(0, gi("maxHit", 0)); q.bestFloor = max(0, gi("bestFloor", 0));
     q.eliteKills = max(0, gi("elite", 0)); q.diceWins = max(0, gi("dice", 0)); q.arenaWins = max(0, gi("arena", 0));
     q.hp = gi("hp", 1); q.mp = gi("mp", 0);
 
@@ -2028,8 +2518,8 @@ bool loadGame(Player& p, int slot) {
     parseList("inv", [&](const string& t) {
         size_t c = t.find(':');
         if (c == string::npos) return;
-        int id = toIntSafe(t.substr(0, c), 0), n = toIntSafe(t.substr(c + 1), 0);
-        if (id > 0 && id < (int)ITEMS.size() && n > 0) q.inv[id] = n;
+        int id = mapId(toIntSafe(t.substr(0, c), 0)), n = toIntSafe(t.substr(c + 1), 0);
+        if (id > 0 && id < (int)ITEMS.size() && n > 0) q.inv[id] += n;
     });
     parseList("quest", [&](const string& t) {
         size_t c1 = t.find(':');
@@ -2100,6 +2590,12 @@ void showHelp() {
         bold("Репутация: ") + "растёт за квесты и добрые дела, даёт скидки в лавке.",
         bold("Очки: ") + "за каждый уровень — 3 свободных очка (Персонаж → распределить).",
         bold("Арена: ") + "3 раунда; можно забрать банк между ними, но смерть сжигает его.",
+        bold("Стихии: ") + "у врагов есть слабость (x1.5) и сопротивление (x0.6). Огонь,",
+        gray("  лёд, яд, свет, молния — у навыков, бомб и редкого оружия. Огонь поджигает."),
+        bold("Приём: ") + "шкала заряжается от ударов и урона; при 100% — особый приём класса.",
+        bold("Редкая экипировка: ") + "редкая, эпическая, легендарная — со случайными свойствами",
+        gray("  (крит, вампиризм, уклонение, стихия). Выпадает из элиты, боссов и сундуков."),
+        bold("Бездна: ") + "подземелье в руинах: 4 комнаты и страж на этаж, глубже — лучше добыча.",
         bold("Сохранение: ") + "3 слота и автосохранение при ночлеге в таверне.",
     }, Col::CYAN);
 }
@@ -2170,6 +2666,7 @@ void gameLoop(Player& p) {
             menu.push_back({"Разбить лагерь", [&] { camp(p); }});
             if (p.loc == L_DUNGEON && !p.trollKingSlain)
                 menu.push_back({magenta("Бросить вызов Гроку"), [&] { bossFight(p, E_TROLLKING); }});
+            if (p.loc == L_RUINS) menu.push_back({magenta("Спуститься в Бездну"), [&] { abyss(p); }});
             if (p.loc == L_LAIR && !p.dragonSlain)
                 menu.push_back({magenta("Сразиться с Игнатором"), [&] { bossFight(p, E_DRAGON); }});
         }
